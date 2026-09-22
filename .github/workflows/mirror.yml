@@ -1,0 +1,124 @@
+name: Refresh public telemetry
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Fetch and validate only the four public snapshots
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import datetime, json, math, pathlib, time, urllib.request
+          BASE = 'https://ecosystem.cascadecreate.com'
+          RANGES = ('6h', '24h', '7d', '30d')
+          LIMIT = 2_000_000
+          def keys(value, expected):
+              if not isinstance(value, dict) or set(value) != set(expected.split()):
+                  raise ValueError('Unexpected public telemetry schema')
+          def number(value):
+              if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+                  raise ValueError('Invalid measurement')
+          def timestamp(value):
+              if value is not None:
+                  if not isinstance(value, str) or not value.endswith('Z'):
+                      raise ValueError('Invalid UTC timestamp')
+                  datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+          def observation(value):
+              if value is None:
+                  return
+              keys(value, 'timestamp temperatureF humidityPct pressureHpa')
+              timestamp(value['timestamp'])
+              for field in ('temperatureF', 'humidityPct', 'pressureHpa'):
+                  number(value[field])
+          def fetch(url):
+              # Fixed public URLs only. No credentials, query controls or redirects.
+              class NoRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, *args, **kwargs):
+                      return None
+              for attempt in range(3):
+                  try:
+                      request = urllib.request.Request(url, headers={'User-Agent': 'tarapoto-public-data-mirror', 'Accept': 'application/json, text/html'})
+                      with urllib.request.build_opener(NoRedirect()).open(request, timeout=45) as response:
+                          if response.status != 200:
+                              raise ValueError('Source did not return HTTP 200')
+                          body = response.read(LIMIT + 1)
+                          if len(body) > LIMIT:
+                              raise ValueError('Source response too large')
+                          return body
+                  except Exception:
+                      if attempt == 2:
+                          raise
+                      time.sleep(5 * (attempt + 1))
+          output = pathlib.Path('_site')
+          output.mkdir()
+          for span in RANGES:
+              # Confirm that this is still the JSON download advertised publicly.
+              public_page = fetch(f'{BASE}/public-data/tarapoto/{span}').decode('utf-8')
+              path = f'/api/ecosystems/tarapoto/analysis/{span}.json'
+              if f'href="{path}"' not in public_page:
+                  raise ValueError('Expected public JSON link missing')
+              data = json.loads(fetch(BASE + path))
+              keys(data, 'ecosystem range generatedAt current freshness history annotations aggregation summary')
+              if data['ecosystem'] != 'tarapoto' or data['range'] != span:
+                  raise ValueError('Unexpected dataset')
+              timestamp(data['generatedAt'])
+              if data['generatedAt'] is None:
+                  raise ValueError('Missing generation timestamp')
+              observation(data['current'])
+              keys(data['freshness'], 'status ageSeconds')
+              if data['freshness']['status'] not in ('fresh', 'stale', 'unavailable', 'unknown'):
+                  raise ValueError('Unexpected freshness status')
+              number(data['freshness']['ageSeconds'])
+              if data['annotations'] != []:
+                  raise ValueError('Annotations require review; never publish journal data')
+              keys(data['aggregation'], 'method interval maximumPoints')
+              if data['aggregation']['method'] != 'mean' or data['aggregation']['interval'] not in ('1m', '3m', '15m', '1h'):
+                  raise ValueError('Unexpected aggregation')
+              maximum = data['aggregation']['maximumPoints']
+              if type(maximum) is not int or not 1 <= maximum <= 10000:
+                  raise ValueError('Invalid maximum points')
+              if not isinstance(data['history'], list) or len(data['history']) > maximum:
+                  raise ValueError('Invalid history')
+              for row in data['history']:
+                  if row is None:
+                      raise ValueError('Invalid history row')
+                  observation(row)
+              summary = data['summary']
+              keys(summary, 'sampleCount observedFrom observedTo temperatureF humidityPct pressureHpa')
+              if summary['sampleCount'] != len(data['history']):
+                  raise ValueError('Sample count mismatch')
+              timestamp(summary['observedFrom'])
+              timestamp(summary['observedTo'])
+              for field in ('temperatureF', 'humidityPct', 'pressureHpa'):
+                  keys(summary[field], 'minimum maximum mean first last change')
+                  for value in summary[field].values():
+                      number(value)
+              (output / f'{span}.json').write_text(json.dumps(data, ensure_ascii=True, allow_nan=False) + '\n')
+              print(f'{span}: validated {len(data["history"])} observations, generated {data["generatedAt"]}')
+          PY
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+          retention-days: 1
+      - name: Publish snapshots
+        id: deployment
+        uses: actions/deploy-pages@v4
