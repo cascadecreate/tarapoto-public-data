@@ -108,6 +108,10 @@ jobs:
               timestamp(summary['observedFrom'])
               timestamp(summary['observedTo'])
               for field in ('temperatureF', 'humidityPct', 'pressureHpa'):
+                  # Empty public windows have null metric summaries, not objects.
+                  if (not data['history'] and summary['observedFrom'] is None
+                          and summary['observedTo'] is None and summary[field] is None):
+                      continue
                   keys(summary[field], 'minimum maximum mean first last change')
                   for value in summary[field].values():
                       number(value)
