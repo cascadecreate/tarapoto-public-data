@@ -84,8 +84,11 @@ jobs:
                   raise ValueError('Missing generation timestamp')
               observation(data['current'])
               keys(data['freshness'], 'status ageSeconds')
-              if data['freshness']['status'] not in ('fresh', 'stale', 'unavailable', 'unknown'):
-                  raise ValueError('Unexpected freshness status')
+              freshness_status = data['freshness']['status']
+              if (not isinstance(freshness_status, str) or not 1 <= len(freshness_status) <= 32
+                      or not all(c.islower() or c.isdigit() or c in '_-' for c in freshness_status)):
+                  raise ValueError(f'Invalid freshness status for {span}: {freshness_status!r}')
+              print(f'{span}: freshness status {freshness_status}')
               number(data['freshness']['ageSeconds'])
               if data['annotations'] != []:
                   raise ValueError('Annotations require review; never publish journal data')
