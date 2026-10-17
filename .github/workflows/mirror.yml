@@ -1,10 +1,6 @@
 name: Refresh public telemetry
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '7,22,37,52 * * * *'
 permissions:
   contents: read
 concurrency:
